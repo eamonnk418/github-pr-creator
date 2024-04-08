@@ -1,236 +1,75 @@
-// Copyright 2018 The go-github AUTHORS. All rights reserved.
-//
-// Use of this source code is governed by a BSD-style
-// license that can be found in the LICENSE file.
-
-// The commitpr command utilizes go-github as a CLI tool for
-// pushing files to a branch and creating a pull request from it.
-// It takes an auth token as an environment variable and creates
-// the commit and the PR under the account affiliated with that token.
-//
-// The purpose of this example is to show how to use refs, trees and commits to
-// create commits and pull requests.
-//
-// Note, if you want to push a single file, you probably prefer to use the
-// content API. An example is available here:
-// https://godoc.org/github.com/google/go-github/github#example-RepositoriesService-CreateFile
-//
-// Note, for this to work at least 1 commit is needed, so you if you use this
-// after creating a repository you might want to make sure you set `AutoInit` to
-// `true`.
 package main
 
 import (
-	"bytes"
 	"context"
-	"errors"
-	"flag"
 	"fmt"
-	"io"
 	"log"
 	"os"
-	"strings"
-	"time"
 
 	"github.com/google/go-github/v61/github"
-	"golang.org/x/crypto/openpgp"
 )
 
-var (
-	sourceOwner   = flag.String("source-owner", "", "Name of the owner (user or org) of the repo to create the commit in.")
-	sourceRepo    = flag.String("source-repo", "", "Name of repo to create the commit in.")
-	commitMessage = flag.String("commit-message", "", "Content of the commit message.")
-	commitBranch  = flag.String("commit-branch", "", "Name of branch to create the commit in. If it does not already exists, it will be created using the `base-branch` parameter")
-	repoBranch    = flag.String("repo-branch", "", "Name of the repository where the changes in the pull request were made. This field is required for cross-repository pull requests if both repositories are owned by the same organization")
-	baseBranch    = flag.String("base-branch", "main", "Name of branch to create the `commit-branch` from.")
-	prRepoOwner   = flag.String("merge-repo-owner", "", "Name of the owner (user or org) of the repo to create the PR against. If not specified, the value of the `-source-owner` flag will be used.")
-	prRepo        = flag.String("merge-repo", "", "Name of repo to create the PR against. If not specified, the value of the `-source-repo` flag will be used.")
-	prBranch      = flag.String("merge-branch", "main", "Name of branch to create the PR against (the one you want to merge your branch in via the PR).")
-	prSubject     = flag.String("pr-title", "", "Title of the pull request. If not specified, no pull request will be created.")
-	prDescription = flag.String("pr-text", "", "Text to put in the description of the pull request.")
-	sourceFiles   = flag.String("files", "", `Comma-separated list of files to commit and their location.
-The local file is separated by its target location by a semi-colon.
-If the file should be in the same location with the same name, you can just put the file name and omit the repetition.
-Example: README.md,main.go:github/examples/commitpr/main.go`)
-	authorName  = flag.String("author-name", "", "Name of the author of the commit.")
-	authorEmail = flag.String("author-email", "", "Email of the author of the commit.")
-	privateKey  = flag.String("private-key", "", "Path to the private key to use to sign the commit.")
-)
-
-var client *github.Client
-var ctx = context.Background()
-
-// getRef returns the commit branch reference object if it exists or creates it
-// from the base branch before returning it.
-func getRef() (ref *github.Reference, err error) {
-	if ref, _, err = client.Git.GetRef(ctx, *sourceOwner, *sourceRepo, "refs/heads/"+*commitBranch); err == nil {
-		return ref, nil
-	}
-
-	// We consider that an error means the branch has not been found and needs to
-	// be created.
-	if *commitBranch == *baseBranch {
-		return nil, errors.New("the commit branch does not exist but `-base-branch` is the same as `-commit-branch`")
-	}
-
-	if *baseBranch == "" {
-		return nil, errors.New("the `-base-branch` should not be set to an empty string when the branch specified by `-commit-branch` does not exists")
-	}
-
-	var baseRef *github.Reference
-	if baseRef, _, err = client.Git.GetRef(ctx, *sourceOwner, *sourceRepo, "refs/heads/"+*baseBranch); err != nil {
-		return nil, err
-	}
-	newRef := &github.Reference{Ref: github.String("refs/heads/" + *commitBranch), Object: &github.GitObject{SHA: baseRef.Object.SHA}}
-	ref, _, err = client.Git.CreateRef(ctx, *sourceOwner, *sourceRepo, newRef)
-	return ref, err
+type GitHubRepository struct {
+	Name     string
+	Language string
 }
 
-// getTree generates the tree to commit based on the given files and the commit
-// of the ref you got in getRef.
-func getTree(ref *github.Reference) (tree *github.Tree, err error) {
-	// Create a tree with what to commit.
-	entries := []*github.TreeEntry{}
-
-	// Load each file into the tree.
-	for _, fileArg := range strings.Split(*sourceFiles, ",") {
-		file, content, err := getFileContent(fileArg)
-		if err != nil {
-			return nil, err
-		}
-		entries = append(entries, &github.TreeEntry{Path: github.String(file), Type: github.String("blob"), Content: github.String(string(content)), Mode: github.String("100644")})
-	}
-
-	tree, _, err = client.Git.CreateTree(ctx, *sourceOwner, *sourceRepo, *ref.Object.SHA, entries)
-	return tree, err
+var languageEcosystem = map[string][]string{
+	"Java":   {"maven", "gradle"},
+	"Kotlin": {"gradle"},
+	"Scala":  {"maven", "gradle"},
 }
 
-// getFileContent loads the local content of a file and return the target name
-// of the file in the target repository and its contents.
-func getFileContent(fileArg string) (targetName string, b []byte, err error) {
-	var localFile string
-	files := strings.Split(fileArg, ":")
-	switch {
-	case len(files) < 1:
-		return "", nil, errors.New("empty `-files` parameter")
-	case len(files) == 1:
-		localFile = files[0]
-		targetName = files[0]
-	default:
-		localFile = files[0]
-		targetName = files[1]
-	}
-
-	b, err = os.ReadFile(localFile)
-	return targetName, b, err
-}
-
-// pushCommit creates the commit in the given reference using the given tree.
-func pushCommit(ref *github.Reference, tree *github.Tree) (err error) {
-	// Get the parent commit to attach the commit to.
-	parent, _, err := client.Repositories.GetCommit(ctx, *sourceOwner, *sourceRepo, *ref.Object.SHA, nil)
-	if err != nil {
-		return err
-	}
-	// This is not always populated, but is needed.
-	parent.Commit.SHA = parent.SHA
-
-	// Create the commit using the tree.
-	date := time.Now()
-	author := &github.CommitAuthor{Date: &github.Timestamp{Time: date}, Name: authorName, Email: authorEmail}
-	commit := &github.Commit{Author: author, Message: commitMessage, Tree: tree, Parents: []*github.Commit{parent.Commit}}
-	opts := github.CreateCommitOptions{}
-	if *privateKey != "" {
-		armoredBlock, e := os.ReadFile(*privateKey)
-		if e != nil {
-			return e
-		}
-		keyring, e := openpgp.ReadArmoredKeyRing(bytes.NewReader(armoredBlock))
-		if e != nil {
-			return e
-		}
-		if len(keyring) != 1 {
-			return errors.New("expected exactly one key in the keyring")
-		}
-		key := keyring[0]
-		opts.Signer = github.MessageSignerFunc(func(w io.Writer, r io.Reader) error {
-			return openpgp.ArmoredDetachSign(w, key, r, nil)
-		})
-	}
-	newCommit, _, err := client.Git.CreateCommit(ctx, *sourceOwner, *sourceRepo, commit, &opts)
-	if err != nil {
-		return err
-	}
-
-	// Attach the commit to the main branch.
-	ref.Object.SHA = newCommit.SHA
-	_, _, err = client.Git.UpdateRef(ctx, *sourceOwner, *sourceRepo, ref, false)
-	return err
-}
-
-// createPR creates a pull request. Based on: https://godoc.org/github.com/google/go-github/github#example-PullRequestsService-Create
-func createPR() (err error) {
-	if *prSubject == "" {
-		return errors.New("missing `-pr-title` flag; skipping PR creation")
-	}
-
-	if *prRepoOwner != "" && *prRepoOwner != *sourceOwner {
-		*commitBranch = fmt.Sprintf("%s:%s", *sourceOwner, *commitBranch)
-	} else {
-		prRepoOwner = sourceOwner
-	}
-
-	if *prRepo == "" {
-		prRepo = sourceRepo
-	}
-
-	newPR := &github.NewPullRequest{
-		Title:               prSubject,
-		Head:                commitBranch,
-		HeadRepo:            repoBranch,
-		Base:                prBranch,
-		Body:                prDescription,
-		MaintainerCanModify: github.Bool(true),
-	}
-
-	pr, _, err := client.PullRequests.Create(ctx, *prRepoOwner, *prRepo, newPR)
-	if err != nil {
-		return err
-	}
-
-	fmt.Printf("PR created: %s\n", pr.GetHTMLURL())
-	return nil
+var packageEcosystem = map[string][]string{
+	"maven":  {"pom.xml"},
+	"gradle": {"build.gradle", "build.gradle.kts"},
+	"npm":    {"package.json"},
+	"gomod":  {"go.mod"},
 }
 
 func main() {
-	flag.Parse()
-	token := os.Getenv("GITHUB_TOKEN")
-	if token == "" {
-		log.Fatal("Unauthorized: No token present")
-	}
-	if *sourceOwner == "" || *sourceRepo == "" || *commitBranch == "" || *sourceFiles == "" || *authorName == "" || *authorEmail == "" {
-		log.Fatal("You need to specify a non-empty value for the flags `-source-owner`, `-source-repo`, `-commit-branch`, `-files`, `-author-name` and `-author-email`")
-	}
-	client = github.NewClient(nil).WithAuthToken(token)
+	client := github.NewClient(nil).WithAuthToken(os.Getenv("GITHUB_TOKEN"))
 
-	ref, err := getRef()
+	repo, _, err := client.Repositories.Get(context.Background(), "eamonnk418", "spring-boot")
 	if err != nil {
-		log.Fatalf("Unable to get/create the commit reference: %s\n", err)
-	}
-	if ref == nil {
-		log.Fatalf("No error where returned but the reference is nil")
+		log.Fatal(err)
 	}
 
-	tree, err := getTree(ref)
+	_, directoryContent, _, err := client.Repositories.GetContents(context.Background(), "eamonnk418", "jenkins", "", nil)
 	if err != nil {
-		log.Fatalf("Unable to create the tree based on the provided files: %s\n", err)
+		log.Fatal(err)
 	}
 
-	if err := pushCommit(ref, tree); err != nil {
-		log.Fatalf("Unable to create the commit: %s\n", err)
+	repoLanguage := repo.GetSource().GetLanguage()
+	packageManagers, ok := languageEcosystem[repoLanguage]
+	if !ok {
+		fmt.Printf("Language '%s' not supported.\n", repoLanguage)
+		return
 	}
 
-	if err := createPR(); err != nil {
-		log.Fatalf("Error while creating the pull request: %s", err)
+	for _, packageManager := range packageManagers {
+		files := packageEcosystem[packageManager]
+		if files == nil {
+			fmt.Printf("No files associated with package manager '%s'.\n", packageManager)
+			continue
+		}
+
+		found := false
+		for _, content := range directoryContent {
+			for _, file := range files {
+				if content.GetName() == file {
+					fmt.Printf("Found file '%s' associated with package manager '%s'.\n", file, packageManager)
+					found = true
+					break
+				}
+			}
+			if found {
+				break
+			}
+		}
+
+		if !found {
+			fmt.Printf("No '%s' file found associated with package manager '%s'.\n", files, packageManager)
+		}
 	}
 }

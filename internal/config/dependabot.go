@@ -19,9 +19,7 @@ type Dependabot struct {
 func generateMap() {
 	result := make(map[string][]string, 0)
 
-
-	
-
+	result["gradle"]= []string{"Java", "Kotlin", "Groovy", "Scala", "Kotlin"}
 	result["gomod"] = []string{"Go"}
 	result["npm"] = []string{"javascript", "nodejs", "npm", "typescript"}
 } 
