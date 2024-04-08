@@ -30,17 +30,29 @@ var packageEcosystem = map[string][]string{
 func main() {
 	client := github.NewClient(nil).WithAuthToken(os.Getenv("GITHUB_TOKEN"))
 
-	repo, _, err := client.Repositories.Get(context.Background(), "eamonnk418", "spring-boot")
+	repoOwner := "eamonnk418"
+	repoName := "spring-boot"
+
+	repo, _, err := client.Repositories.Get(context.Background(), repoOwner, repoName)
 	if err != nil {
 		log.Fatal(err)
 	}
 
-	_, directoryContent, _, err := client.Repositories.GetContents(context.Background(), "eamonnk418", "jenkins", "", nil)
+	fmt.Printf("Searching Repository: %s\n", repo.GetFullName())
+
+	_, directoryContent, _, err := client.Repositories.GetContents(context.Background(), repoOwner, repoName, "", nil)
 	if err != nil {
 		log.Fatal(err)
 	}
 
-	repoLanguage := repo.GetSource().GetLanguage()
+	// Determine the language of the repository based on the files
+	repoLanguage := getLanguage(directoryContent)
+	if repoLanguage == "" {
+		fmt.Println("Unable to determine repository language.")
+		return
+	}
+	fmt.Printf("Detected Repository Language: %s\n", repoLanguage)
+
 	packageManagers, ok := languageEcosystem[repoLanguage]
 	if !ok {
 		fmt.Printf("Language '%s' not supported.\n", repoLanguage)
@@ -72,4 +84,25 @@ func main() {
 			fmt.Printf("No '%s' file found associated with package manager '%s'.\n", files, packageManager)
 		}
 	}
+}
+
+// Function to determine the language of the repository based on the files present
+func getLanguage(contents []*github.RepositoryContent) string {
+	for _, content := range contents {
+		if content.GetType() == "file" {
+			switch content.GetName() {
+			case "pom.xml":
+				return "Java"
+			case "build.gradle", "build.gradle.kts":
+				return "Java"
+			case "build.sbt":
+				return "Scala"
+			case "package.json":
+				return "JavaScript"
+			case "go.mod":
+				return "Go"
+			}
+		}
+	}
+	return "" // No specific language detected
 }
