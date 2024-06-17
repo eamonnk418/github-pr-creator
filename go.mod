@@ -4,7 +4,7 @@ go 1.22.1
 
 require (
 	github.com/google/go-github/v61 v61.0.0
-	github.com/spf13/cobra v1.8.0
+	github.com/spf13/cobra v1.8.1
 )
 
 require (
